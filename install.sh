@@ -9,8 +9,8 @@ SERVICE_FILE="/etc/systemd/system/verus-miner.service"
 RELEASE="v3.8.3a-CPU"
 BASE_URL="https://github.com/Oink70/ccminer-verus/releases/download/${RELEASE}"
 
-# Published SHA256 values should be added here after confirming the
-# exact release assets. Leaving them empty disables checksum verification.
+# Add the published SHA256 values for the exact release assets
+# before enabling mandatory checksum verification.
 SHA256_ARM64=""
 SHA256_X86_64=""
 
@@ -37,10 +37,6 @@ echo "║              ⛏️  VERUS MINER               ║"
 echo "║              INSTALLER v2                  ║"
 echo "╚════════════════════════════════════════════╝"
 echo
-
-# ------------------------------------------------------------
-# Dependencies
-# ------------------------------------------------------------
 
 for cmd in curl sha256sum install systemctl uname nproc; do
     require_command "$cmd"
@@ -72,37 +68,24 @@ printf '│ Release      : %-26s │\n' "$RELEASE"
 echo "╰────────────────────────────────────────────╯"
 echo
 
-# ------------------------------------------------------------
-# Create directories
-# ------------------------------------------------------------
-
-mkdir -p "$APP_DIR"
-mkdir -p "$CONFIG_DIR"
-
+mkdir -p "$APP_DIR" "$CONFIG_DIR"
 chmod 755 "$APP_DIR"
 chmod 700 "$CONFIG_DIR"
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
-
 if [[ ! -f "$CONFIG_FILE" ]]; then
-
     echo "=== Mining configuration ==="
     echo
 
     read -r -p "VRSC wallet address: " WALLET
     [[ -n "$WALLET" ]] || die "Wallet address cannot be empty."
 
-    read -r -p \
-        "Pool [stratum+tcp://pool.verus.io:9999]: " POOL
+    read -r -p "Pool [stratum+tcp://pool.verus.io:9999]: " POOL
     POOL="${POOL:-stratum+tcp://pool.verus.io:9999}"
 
     read -r -p "Worker [worker-01]: " WORKER
     WORKER="${WORKER:-worker-01}"
 
     CPU_COUNT="$(nproc)"
-
     if (( CPU_COUNT > 4 )); then
         DEFAULT_THREADS=4
     else
@@ -112,14 +95,9 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     read -r -p "CPU threads [$DEFAULT_THREADS]: " THREADS
     THREADS="${THREADS:-$DEFAULT_THREADS}"
 
-    [[ "$THREADS" =~ ^[0-9]+$ ]] ||
-        die "THREADS must be a positive integer."
-
-    (( THREADS >= 1 )) ||
-        die "THREADS must be at least 1."
-
-    (( THREADS <= CPU_COUNT )) ||
-        die "THREADS cannot exceed available CPU threads ($CPU_COUNT)."
+    [[ "$THREADS" =~ ^[0-9]+$ ]] || die "THREADS must be a positive integer."
+    (( THREADS >= 1 )) || die "THREADS must be at least 1."
+    (( THREADS <= CPU_COUNT )) || die "THREADS cannot exceed available CPU threads ($CPU_COUNT)."
 
     read -r -p "Pool password [x]: " PASSWORD
     PASSWORD="${PASSWORD:-x}"
@@ -133,26 +111,121 @@ POOL=$POOL
 WORKER=$WORKER
 THREADS=$THREADS
 PASSWORD=$PASSWORD
-
-# Lower CPU priority so other services remain responsive.
 NICE_LEVEL=10
 EOF
 
     chmod 600 "$CONFIG_FILE"
-
     echo
     log "Configuration saved to $CONFIG_FILE"
-
 else
-
     log "Existing configuration detected."
 fi
-
-# ------------------------------------------------------------
-# Download miner
-# ------------------------------------------------------------
 
 TMP_FILE="$APP_DIR/ccminer.download"
 MINER="$APP_DIR/ccminer"
 
 echo
+log "Downloading CCminer..."
+echo "URL: $DOWNLOAD_URL"
+echo
+
+rm -f "$TMP_FILE"
+
+curl \
+    --fail \
+    --location \
+    --show-error \
+    --retry 3 \
+    --retry-delay 2 \
+    --connect-timeout 15 \
+    --max-time 600 \
+    "$DOWNLOAD_URL" \
+    --output "$TMP_FILE" || die "Miner download failed."
+
+[[ -s "$TMP_FILE" ]] || die "Downloaded miner is empty."
+
+chmod 755 "$TMP_FILE"
+
+if [[ -n "$EXPECTED_SHA256" ]]; then
+    log "Verifying SHA256..."
+    ACTUAL_SHA256="$(sha256sum "$TMP_FILE" | awk '{print $1}')"
+
+    if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+        rm -f "$TMP_FILE"
+        die "SHA256 verification failed."
+    fi
+
+    log "SHA256 verification passed."
+else
+    log "SHA256 value not configured for this asset."
+    log "Download completed, but checksum verification was skipped."
+fi
+
+mv "$TMP_FILE" "$MINER"
+chmod 755 "$MINER"
+
+log "Testing miner binary..."
+if ! "$MINER" --help >/dev/null 2>&1; then
+    [[ -x "$MINER" ]] || die "Miner binary is not executable."
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+for script in miner.sh start.sh stop.sh restart.sh status.sh; do
+    [[ -f "$SCRIPT_DIR/$script" ]] || die "Missing project file: $script"
+    install -m 0755 "$SCRIPT_DIR/$script" "$APP_DIR/$script"
+done
+
+cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Verus CPU Miner
+Documentation=https://docs.verus.io/economy/start-mining.html
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/miner.sh
+Restart=on-failure
+RestartSec=15
+KillSignal=SIGINT
+TimeoutStopSec=30
+LimitNOFILE=65536
+Nice=10
+CPUWeight=50
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+log "Reloading systemd..."
+systemctl daemon-reload
+
+log "Enabling verus-miner service..."
+systemctl enable verus-miner
+
+echo
+echo "╭────────────────────────────────────────────╮"
+echo "│          VERUS MINER INSTALLED             │"
+echo "├────────────────────────────────────────────┤"
+printf '│ Architecture : %-26s │\n' "$ARCH"
+printf '│ Threads      : %-26s │\n' "$(grep '^THREADS=' "$CONFIG_FILE" | cut -d= -f2)"
+printf '│ Config       : %-26s │\n' "$CONFIG_FILE"
+printf '│ Binary       : %-26s │\n' "$MINER"
+printf '│ Service      : %-26s │\n' "verus-miner"
+echo "╰────────────────────────────────────────────╯"
+echo
+echo "Installation complete."
+echo
+echo "Start:"
+echo "  sudo systemctl start verus-miner"
+echo
+echo "Status:"
+echo "  sudo systemctl status verus-miner"
+echo
+echo "Logs:"
+echo "  sudo journalctl -u verus-miner -f"
+echo
+echo "IMPORTANT: The miner is NOT started automatically."
