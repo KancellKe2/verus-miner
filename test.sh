@@ -2,7 +2,7 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
 PASS=0
 FAIL=0
@@ -123,7 +123,7 @@ fi
 
 if grep -RInE 'curl[^|;&]*\|[[:space:]]*(bash|sh)|wget[^|;&]*\|[[:space:]]*(bash|sh)' \
     --exclude-dir=.git . >/dev/null 2>&1; then
-    fail "pipe-to-shell pattern detected"
+    fail "pipe-to-shell installer pattern detected"
 else
     ok "no pipe-to-shell installer pattern detected"
 fi
