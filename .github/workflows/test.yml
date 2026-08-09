@@ -41,3 +41,6 @@ jobs:
 
       - name: Project test suite
         run: ./test.sh
+
+      - name: Verus miner binary test
+        run: ./test-miner.sh
