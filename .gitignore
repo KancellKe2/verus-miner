@@ -1,0 +1,8 @@
+config.env
+*.env
+*.log
+logs/*
+!logs/.gitkeep
+ccminer
+*.tar.gz
+*.zip
