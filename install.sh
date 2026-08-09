@@ -11,7 +11,7 @@ BASE_URL="https://github.com/Oink70/ccminer-verus/releases/download/${RELEASE}"
 
 # Add the published SHA256 values for the exact release assets
 # before enabling mandatory checksum verification.
-SHA256_ARM64=""
+SHA256_ARM64="7f900233711a153cb5099e77ccd9bf735b8cf9866c693a958946a0c8314a99c5"
 SHA256_X86_64=""
 
 log() {

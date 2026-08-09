@@ -1,24 +1,38 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -u
 
+APP_DIR="/opt/verus-miner"
 CONFIG="/etc/verus-miner/config.env"
 SERVICE="verus-miner"
-MINER="/opt/verus-miner/ccminer"
+MINER="$APP_DIR/ccminer"
 LOG_FILE="/var/log/verus-miner/miner.log"
+UI="$APP_DIR/ui/verus-ui.sh"
 
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
+if [[ -r "$UI" ]]; then
+    # shellcheck disable=SC1090
+    source "$UI"
+else
+    echo "ERROR: UI library not found: $UI"
+    exit 1
+fi
 
 get_config() {
     local key="$1"
-    if [[ -r "$CONFIG" ]]; then
-        awk -F= -v k="$key" '$1 == k {sub(/^[^=]*=/, ""); print; exit}' "$CONFIG"
-    fi
+
+    [[ -r "$CONFIG" ]] || return 0
+
+    awk -F= -v k="$key" '$1 == k {
+        sub(/^[^=]*=/, "")
+        print
+        exit
+    }' "$CONFIG"
 }
 
 format_uptime() {
     local seconds="${1:-0}"
+
+    (( seconds < 0 )) && seconds=0
+
     local days=$((seconds / 86400))
     local hours=$(((seconds % 86400) / 3600))
     local minutes=$(((seconds % 3600) / 60))
@@ -32,98 +46,153 @@ format_uptime() {
     fi
 }
 
-echo
-echo "╔══════════════════════════════════════════════════╗"
-echo "║                 ⛏️  VERUS MINER                  ║"
-echo "║                    STATUS                        ║"
-echo "╚══════════════════════════════════════════════════╝"
-echo
+get_cpu_usage() {
+    local pid="$1"
 
-if systemctl is-active --quiet "$SERVICE"; then
-    STATUS="RUNNING"
-else
-    STATUS="STOPPED"
-fi
+    if [[ -n "$pid" ]] &&
+       [[ "$pid" =~ ^[0-9]+$ ]] &&
+       ps -p "$pid" >/dev/null 2>&1; then
+        ps -p "$pid" -o %cpu= | xargs
+    else
+        echo "0%"
+    fi
+}
+
+get_uptime() {
+    local pid="$1"
+
+    if [[ -n "$pid" ]] &&
+       [[ "$pid" =~ ^[0-9]+$ ]] &&
+       [[ -r "/proc/$pid/stat" ]]; then
+
+        local start_ticks
+        local uptime
+        local hz
+
+        start_ticks="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || echo 0)"
+        hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+        uptime="$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)"
+
+        if [[ "$start_ticks" =~ ^[0-9]+$ ]] &&
+           [[ "$hz" =~ ^[0-9]+$ ]] &&
+           [[ "$uptime" =~ ^[0-9]+$ ]] &&
+           (( hz > 0 )); then
+
+            local process_start=$((start_ticks / hz))
+            local seconds=$((uptime - process_start))
+
+            format_uptime "$seconds"
+            return
+        fi
+    fi
+
+    echo "—"
+}
+
+get_hashrate() {
+    local result=""
+
+    if [[ -f "$LOG_FILE" ]]; then
+        result="$(
+            grep -Eio \
+                '[0-9]+([.][0-9]+)?[[:space:]]*(KH/s|MH/s|GH/s|H/s)' \
+                "$LOG_FILE" 2>/dev/null |
+            tail -n 1 |
+            xargs
+        )"
+    fi
+
+    if [[ -n "$result" ]]; then
+        echo "$result"
+    else
+        echo "Waiting..."
+    fi
+}
+
+get_pool_display() {
+    local pool="$1"
+
+    pool="${pool#stratum+tcp://}"
+    pool="${pool#stratum+ssl://}"
+    echo "$pool"
+}
+
+# ----------------------------------------------------
+# Collect data
+# ----------------------------------------------------
 
 ARCH="$(uname -m)"
 CPU_COUNT="$(nproc 2>/dev/null || echo "?")"
+
 THREADS="$(get_config THREADS)"
 WORKER="$(get_config WORKER)"
 POOL="$(get_config POOL)"
 
-PID=""
-if command_exists systemctl; then
-    PID="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)"
-fi
+[[ -n "$THREADS" ]] || THREADS="—"
+[[ -n "$WORKER" ]] || WORKER="—"
+[[ -n "$POOL" ]] || POOL="—"
 
-[[ "$PID" == "0" ]] && PID=""
+POOL_DISPLAY="$(get_pool_display "$POOL")"
 
-CPU_USAGE=""
-if [[ -n "$PID" ]] && [[ "$PID" =~ ^[0-9]+$ ]] && command_exists ps; then
-    if ps -p "$PID" >/dev/null 2>&1; then
-        CPU_USAGE="$(ps -p "$PID" -o %cpu= | xargs)"
-    fi
-fi
-
-UPTIME_SECONDS=0
-if command_exists systemctl; then
-    ACTIVE_TS="$(systemctl show -p ActiveEnterTimestampMonotonic --value "$SERVICE" 2>/dev/null || true)"
-    NOW_MONO="$(awk '{print $1 * 1000000}' /proc/uptime 2>/dev/null || echo 0)"
-
-    if [[ "$ACTIVE_TS" =~ ^[0-9]+$ ]] && [[ "$NOW_MONO" =~ ^[0-9]+$ ]]; then
-        # systemd monotonic timestamps are microseconds.
-        UPTIME_SECONDS=$(( (NOW_MONO - ACTIVE_TS) / 1000000 ))
-        (( UPTIME_SECONDS < 0 )) && UPTIME_SECONDS=0
-    fi
-fi
-
-echo "╭──────────────────────────────────────────────────╮"
-printf '│ Status       : %-34s │\n' "$STATUS"
-printf '│ Architecture : %-34s │\n' "$ARCH"
-printf '│ CPU threads  : %-34s │\n' "$CPU_COUNT"
-printf '│ Mining threads: %-33s │\n' "${THREADS:-unknown}"
-printf '│ Worker       : %-34s │\n' "${WORKER:-unknown}"
-printf '│ PID          : %-34s │\n' "${PID:-unknown}"
-printf '│ CPU usage    : %-34s │\n' "${CPU_USAGE:-unknown}"
-printf '│ Uptime       : %-34s │\n' "$(format_uptime "$UPTIME_SECONDS")"
-echo "╰──────────────────────────────────────────────────╯"
-
-echo
-echo "Pool:"
-echo "  ${POOL:-unknown}"
-
-echo
-echo "Miner:"
-if [[ -x "$MINER" ]]; then
-    echo "  ✓ $MINER"
+if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    STATE="RUNNING"
 else
-    echo "  ✗ Miner binary not found"
+    STATE="STOPPED"
 fi
 
-echo
-echo "Configuration:"
-if [[ -f "$CONFIG" ]]; then
-    echo "  ✓ $CONFIG"
+PID="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)"
+
+if [[ "$PID" == "0" ]]; then
+    PID=""
+fi
+
+if [[ "$STATE" == "RUNNING" ]]; then
+    CPU_USAGE="$(get_cpu_usage "$PID")"
+    SERVICE_UPTIME="$(get_uptime "$PID")"
+    HASHRATE="$(get_hashrate)"
 else
-    echo "  ✗ Configuration not found"
+    CPU_USAGE="0%"
+    SERVICE_UPTIME="—"
+    HASHRATE="—"
 fi
 
-echo
-echo "Recent miner output:"
-echo "────────────────────────────────────────────────────"
+# ----------------------------------------------------
+# Dashboard
+# ----------------------------------------------------
 
-if [[ -f "$LOG_FILE" ]]; then
-    tail -n 15 "$LOG_FILE"
+ui_clear
+ui_header "MINING DASHBOARD"
+
+ui_section "SYSTEM"
+ui_row "Architecture" "$ARCH"
+ui_row "CPU" "$CPU_COUNT cores"
+ui_row "Threads" "$THREADS"
+ui_row "CPU usage" "$CPU_USAGE"
+ui_row "Uptime" "$SERVICE_UPTIME"
+ui_section_end
+
+echo
+
+ui_section "MINING"
+
+printf '│ %-15s : ' "Status"
+ui_status "$STATE"
+printf ' %*s│\n' 18 ''
+
+ui_row "Worker" "$WORKER"
+ui_row "Algorithm" "VerusHash"
+ui_row "Hashrate" "$HASHRATE"
+ui_row "Pool" "$POOL_DISPLAY"
+ui_row "PID" "${PID:-—}"
+
+ui_section_end
+
+echo
+
+if [[ "$STATE" == "RUNNING" ]]; then
+    ui_ok "Verus miner is running"
 else
-    echo "No miner log available yet."
+    ui_warn "Verus miner is stopped"
 fi
 
-echo "────────────────────────────────────────────────────"
-
-echo
-echo "Service commands:"
-echo "  Start   : sudo systemctl start $SERVICE"
-echo "  Stop    : sudo systemctl stop $SERVICE"
-echo "  Restart : sudo systemctl restart $SERVICE"
-echo "  Logs    : sudo journalctl -u $SERVICE -f"
-echo
+ui_footer
