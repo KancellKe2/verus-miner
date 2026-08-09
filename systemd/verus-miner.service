@@ -1,1 +1,17 @@
+[Unit]
+Description=Verus CPU Miner
+After=network-online.target
+Wants=network-online.target
 
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/verus-miner
+ExecStart=/opt/verus-miner/miner.sh
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
