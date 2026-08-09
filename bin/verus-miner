@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+
+set -u
+
+APP_DIR="/opt/verus-miner"
+UI="$APP_DIR/ui/verus-ui.sh"
+
+[[ -r "$UI" ]] || {
+    echo "ERROR: UI library not found: $UI"
+    exit 1
+}
+
+# shellcheck disable=SC1090
+source "$UI"
+
+MENU=(
+    "Start Miner"
+    "Stop Miner"
+    "Restart Miner"
+    "Miner Status"
+    "Auto Start"
+    "View Logs"
+    "Configuration"
+    "System Test"
+    "Update"
+    "Uninstall"
+    "Exit"
+)
+
+SELECTED=0
+
+draw_menu() {
+    ui_clear
+    ui_header "CONTROL PANEL"
+
+    ui_section "MAIN MENU"
+
+    local i
+
+    for i in "${!MENU[@]}"; do
+        if (( i == SELECTED )); then
+            printf '│ %b❯ %-37s%b│\n' \
+                "$UI_CYAN$UI_BOLD" "${MENU[$i]}" "$UI_RESET"
+        else
+            printf '│   %-37s│\n' "${MENU[$i]}"
+        fi
+    done
+
+    ui_section_end
+
+    echo
+    printf '  %b↑ ↓%b Navigate   %bEnter%b Select   %bq/Esc%b Exit\n' \
+        "$UI_BOLD" "$UI_RESET" \
+        "$UI_BOLD" "$UI_RESET" \
+        "$UI_BOLD" "$UI_RESET"
+}
+
+pause_menu() {
+    echo
+    printf '  Press %bEnter%b to return to menu...' \
+        "$UI_BOLD" "$UI_RESET"
+    read -r
+}
+
+confirm_action() {
+    local action="$1"
+
+    ui_clear
+    ui_header "CONFIRM ACTION"
+
+    echo
+    printf '  %b%s%b\n' "$UI_YELLOW$UI_BOLD" "$action" "$UI_RESET"
+    echo
+
+    printf '  Continue?  %b[Y]%b Yes   %b[N]%b No\n' \
+        "$UI_GREEN$UI_BOLD" "$UI_RESET" \
+        "$UI_RED$UI_BOLD" "$UI_RESET"
+
+    while true; do
+        IFS= read -rsn1 key
+
+        case "${key,,}" in
+            y)
+                return 0
+                ;;
+            n|$'\x1b')
+                return 1
+                ;;
+        esac
+    done
+}
+
+run_action() {
+    case "$1" in
+
+        0)
+            if confirm_action "Start Verus Miner"; then
+                if systemctl start verus-miner; then
+                    ui_ok "Miner started successfully."
+                else
+                    ui_error "Failed to start miner."
+                fi
+            else
+                ui_warn "Action cancelled."
+            fi
+            pause_menu
+            ;;
+
+        1)
+            if confirm_action "Stop Verus Miner"; then
+                if systemctl stop verus-miner; then
+                    ui_ok "Miner stopped successfully."
+                else
+                    ui_error "Failed to stop miner."
+                fi
+            else
+                ui_warn "Action cancelled."
+            fi
+            pause_menu
+            ;;
+
+        2)
+            if confirm_action "Restart Verus Miner"; then
+                if systemctl restart verus-miner; then
+                    ui_ok "Miner restarted successfully."
+                else
+                    ui_error "Failed to restart miner."
+                fi
+            else
+                ui_warn "Action cancelled."
+            fi
+            pause_menu
+            ;;
+
+        3)
+            "$APP_DIR/status.sh"
+            pause_menu
+            ;;
+
+        4)
+            ui_clear
+            ui_header "AUTO START"
+
+            if systemctl is-enabled --quiet verus-miner 2>/dev/null; then
+                AUTO_STATE="ON"
+            else
+                AUTO_STATE="OFF"
+            fi
+
+            ui_section "AUTO START"
+            printf '│ %-15s : ' "Status"
+            ui_status "$AUTO_STATE"
+            printf ' %*s│\n' 16 ''
+            ui_section_end
+
+            echo
+            printf '  %b[E]%b Enable   %b[D]%b Disable   %b[Esc]%b Back\n' \
+                "$UI_GREEN$UI_BOLD" "$UI_RESET" \
+                "$UI_RED$UI_BOLD" "$UI_RESET" \
+                "$UI_BOLD" "$UI_RESET"
+
+            while true; do
+                IFS= read -rsn1 auto_key
+
+                case "${auto_key,,}" in
+                    e)
+                        if systemctl enable verus-miner >/dev/null 2>&1; then
+                            ui_ok "Auto Start enabled."
+                        else
+                            ui_error "Failed to enable Auto Start."
+                        fi
+                        pause_menu
+                        break
+                        ;;
+
+                    d)
+                        if systemctl disable verus-miner >/dev/null 2>&1; then
+                            ui_ok "Auto Start disabled."
+                        else
+                            ui_error "Failed to disable Auto Start."
+                        fi
+                        pause_menu
+                        break
+                        ;;
+
+                    $'\x1b')
+                        break
+                        ;;
+                esac
+            done
+            ;;
+
+        5)
+            ui_clear
+            ui_header "MINER LOGS"
+
+            if systemctl is-active --quiet verus-miner 2>/dev/null; then
+                journalctl -u verus-miner -n 40 --no-pager
+            else
+                ui_warn "Miner is currently stopped."
+                echo
+                journalctl -u verus-miner -n 40 --no-pager
+            fi
+
+            pause_menu
+            ;;
+
+        6)
+            ui_clear
+            ui_header "CONFIGURATION"
+
+            if [[ -r /etc/verus-miner/config.env ]]; then
+                echo
+                ui_row "Config" "/etc/verus-miner/config.env"
+                echo
+                sed -E \
+                    's/^(WALLET=).*/\1********/;
+                     s/^(PASSWORD=).*/\1********/' \
+                    /etc/verus-miner/config.env
+            else
+                ui_warn "Configuration has not been created yet."
+            fi
+
+            pause_menu
+            ;;
+
+        7)
+            ui_clear
+            ui_header "SYSTEM TEST"
+
+            echo
+            "$APP_DIR/test.sh"
+
+            echo
+
+            if [[ -x "$APP_DIR/test-miner.sh" ]]; then
+                "$APP_DIR/test-miner.sh"
+            else
+                ui_warn "test-miner.sh not found."
+            fi
+
+            pause_menu
+            ;;
+
+        8)
+            if confirm_action "Update Verus Miner repository"; then
+                cd "$APP_DIR" || exit 1
+
+                if git pull --ff-only; then
+                    ui_ok "Repository updated successfully."
+                else
+                    ui_error "Repository update failed."
+                fi
+            else
+                ui_warn "Update cancelled."
+            fi
+
+            pause_menu
+            ;;
+
+        9)
+            if confirm_action "UNINSTALL Verus Miner"; then
+                ui_clear
+                ui_header "UNINSTALL"
+
+                echo
+                ui_warn "This will remove the miner installation."
+                echo
+
+                printf '  Type %bUNINSTALL%b to continue: ' \
+                    "$UI_RED$UI_BOLD" "$UI_RESET"
+
+                read -r confirm
+
+                if [[ "$confirm" == "UNINSTALL" ]]; then
+                    "$APP_DIR/uninstall.sh"
+                    exit $?
+                else
+                    ui_warn "Uninstall cancelled."
+                    pause_menu
+                fi
+            else
+                ui_warn "Uninstall cancelled."
+                pause_menu
+            fi
+            ;;
+
+        10)
+            ui_clear
+            exit 0
+            ;;
+    esac
+}
+
+while true; do
+
+    draw_menu
+
+    IFS= read -rsn1 key
+
+    case "$key" in
+
+        q|Q)
+            ui_clear
+            exit 0
+            ;;
+
+        "")
+            run_action "$SELECTED"
+            ;;
+
+        $'\x1b')
+            IFS= read -rsn2 key2
+
+            case "$key2" in
+                '[A')
+                    (( SELECTED-- ))
+                    (( SELECTED < 0 )) && \
+                        SELECTED=$((${#MENU[@]} - 1))
+                    ;;
+
+                '[B')
+                    (( SELECTED++ ))
+                    (( SELECTED >= ${#MENU[@]} )) && \
+                        SELECTED=0
+                    ;;
+
+                '')
+                    ui_clear
+                    exit 0
+                    ;;
+            esac
+            ;;
+
+    esac
+done
